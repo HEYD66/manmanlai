@@ -38,6 +38,14 @@
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
+仓库也提供了一个便于测试的 debug 安装包：
+
+```text
+dist/manmanlai-v1.0.0-debug.apk
+```
+
+这个 APK 仅用于真机测试，不是正式签名发布版。
+
 如果需要指定 Android Studio 自带的 JDK：
 
 ```powershell
