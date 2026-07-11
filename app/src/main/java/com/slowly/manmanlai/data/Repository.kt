@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import androidx.room.withTransaction
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
@@ -60,6 +61,7 @@ class ManManLaiRepository(private val db: AppDatabase) {
         remindAt: Long?,
         tags: List<String>,
         reminderCycleMinutes: Int? = null,
+        priority: Priority = Priority.NORMAL,
     ): Long {
         val nextOrder = db.taskDao().maxDeckOrder() + 1
         return db.taskDao().upsert(
@@ -69,6 +71,7 @@ class ManManLaiRepository(private val db: AppDatabase) {
                 dueAt = dueAt,
                 remindAt = remindAt,
                 reminderCycleMinutes = reminderCycleMinutes,
+                priority = priority,
                 tags = tags,
                 deckOrder = nextOrder,
             ),
@@ -79,53 +82,107 @@ class ManManLaiRepository(private val db: AppDatabase) {
 
     suspend fun deleteTask(task: PlanTask) = db.taskDao().upsert(task.copy(status = TaskStatus.DELETED))
 
-    suspend fun restoreTask(task: PlanTask) {
-        db.taskDao().upsert(task.copy(status = TaskStatus.TODO, deckOrder = db.taskDao().maxDeckOrder() + 1))
+    suspend fun restoreTask(task: PlanTask): PlanTask = db.withTransaction {
+        val nextReminder = task.reminderCycleMinutes?.let {
+            System.currentTimeMillis() + it.coerceAtLeast(1) * 60_000L
+        }
+        task.copy(
+            status = TaskStatus.TODO,
+            completedAt = null,
+            remindAt = nextReminder,
+            deckOrder = db.taskDao().maxDeckOrder() + 1,
+        ).also { db.taskDao().upsert(it) }
     }
 
     suspend fun purgeTask(task: PlanTask) = db.taskDao().delete(task.id)
 
-    suspend fun deleteCompletedCard(card: CompletedCard) = db.cardDao().delete(card.id)
-
-    suspend fun returnCardToDeck(card: CompletedCard) {
-        addTask(
-            title = card.title,
-            description = card.summary,
-            dueAt = null,
-            remindAt = null,
-            tags = listOf("\u5361\u5305\u8fd4\u56de"),
-        )
+    suspend fun deleteCompletedCard(card: CompletedCard) = db.withTransaction {
+        db.taskDao().taskById(card.sourceTaskId)?.let { source ->
+            if (source.status == TaskStatus.DONE) {
+                db.taskDao().upsert(source.copy(status = TaskStatus.DELETED))
+            }
+        }
         db.cardDao().delete(card.id)
+    }
+
+    suspend fun returnCardToDeck(card: CompletedCard): PlanTask = db.withTransaction {
+        val nextReminder = card.reminderCycleMinutes?.let {
+            System.currentTimeMillis() + it.coerceAtLeast(1) * 60_000L
+        }
+        val restored = db.taskDao().taskById(card.sourceTaskId)?.copy(
+            status = TaskStatus.TODO,
+            completedAt = null,
+            remindAt = nextReminder,
+            deckOrder = db.taskDao().maxDeckOrder() + 1,
+        ) ?: PlanTask(
+            title = card.title,
+            description = card.description,
+            createdAt = card.createdAt,
+            dueAt = card.dueAt,
+            remindAt = nextReminder,
+            reminderCycleMinutes = card.reminderCycleMinutes,
+            priority = card.priority,
+            tags = card.tags,
+            postponeCount = card.postponeCount,
+            delayReason = card.delayReason,
+            deckOrder = db.taskDao().maxDeckOrder() + 1,
+        )
+        val restoredId = db.taskDao().upsert(restored)
+        db.cardDao().delete(card.id)
+        if (restored.id == 0L) restored.copy(id = restoredId) else restored
     }
 
     suspend fun cycleTask(task: PlanTask) {
         db.taskDao().upsert(task.copy(deckOrder = db.taskDao().maxDeckOrder() + 1))
     }
 
-    suspend fun postponeTask(task: PlanTask, reason: String = "\u5148\u7f13\u4e00\u7f13") {
-        db.taskDao().upsert(task.copy(postponeCount = task.postponeCount + 1, delayReason = reason))
+    suspend fun focusTask(taskId: Long) = db.withTransaction {
+        val task = db.taskDao().taskById(taskId) ?: return@withTransaction
+        if (task.status == TaskStatus.TODO) {
+            db.taskDao().upsert(task.copy(deckOrder = db.taskDao().minDeckOrder() - 1))
+        }
     }
 
-    suspend fun completeTask(task: PlanTask, templateId: String): CompletedCard {
+    suspend fun postponeTask(task: PlanTask, reason: String = "\u5148\u7f13\u4e00\u7f13"): PlanTask = db.withTransaction {
+        val snoozeMinutes = task.reminderCycleMinutes ?: 15
+        task.copy(
+            postponeCount = task.postponeCount + 1,
+            delayReason = reason,
+            remindAt = System.currentTimeMillis() + snoozeMinutes * 60_000L,
+            deckOrder = db.taskDao().maxDeckOrder() + 1,
+        ).also { db.taskDao().upsert(it) }
+    }
+
+    suspend fun completeTask(task: PlanTask, cardStyleId: String): CompletedCard = db.withTransaction {
+        db.cardDao().cardBySourceTaskId(task.id)?.let { return@withTransaction it }
+        val current = db.taskDao().taskById(task.id) ?: task
         val now = System.currentTimeMillis()
-        val done = task.copy(status = TaskStatus.DONE, completedAt = now)
+        val done = current.copy(status = TaskStatus.DONE, completedAt = now)
         db.taskDao().upsert(done)
         val achievements = unlockAchievements(done)
         val card = CompletedCard(
-            sourceTaskId = task.id,
-            title = task.title,
-            createdAt = task.createdAt,
+            sourceTaskId = done.id,
+            title = done.title,
+            createdAt = done.createdAt,
             completedAt = now,
-            summary = if (task.postponeCount > 0) {
+            summary = if (done.postponeCount > 0) {
                 "\u7ed5\u4e86\u4e00\u70b9\u8def\uff0c\u4f46\u8fd8\u662f\u5b8c\u6210\u4e86\u3002"
             } else {
                 "\u6309\u81ea\u5df1\u7684\u8282\u594f\u5b8c\u6210\u3002"
             },
-            templateId = templateId,
+            templateId = cardStyleId,
+            description = done.description,
+            dueAt = done.dueAt,
+            remindAt = done.remindAt,
+            reminderCycleMinutes = done.reminderCycleMinutes,
+            priority = done.priority,
+            tags = done.tags,
+            postponeCount = done.postponeCount,
+            delayReason = done.delayReason,
             achievementIds = achievements,
         )
-        db.cardDao().insert(card)
-        return card
+        val id = db.cardDao().insert(card)
+        card.copy(id = id)
     }
 
     suspend fun dailySummary(date: LocalDate = LocalDate.now()): DailySummary {
@@ -143,23 +200,30 @@ class ManManLaiRepository(private val db: AppDatabase) {
 
     suspend fun exportJson(): String {
         val root = JSONObject()
+        root.put("schemaVersion", 3)
         root.put("tasks", JSONArray(db.taskDao().allTasks().map { it.toJson() }))
         root.put("cards", JSONArray(db.cardDao().allCards().map { it.toJson() }))
         root.put("achievements", JSONArray(db.achievementDao().allAchievements().map { it.toJson() }))
         return root.toString(2)
     }
 
-    suspend fun importJson(json: String) {
+    suspend fun importJson(json: String): List<PlanTask> {
         val root = JSONObject(json)
-        root.optJSONArray("tasks")?.let { array ->
-            for (i in 0 until array.length()) db.taskDao().upsert(array.getJSONObject(i).toPlanTask())
+        val tasks = root.optJSONArray("tasks")?.let { array ->
+            List(array.length()) { array.getJSONObject(it).toPlanTask() }
+        }.orEmpty()
+        val cards = root.optJSONArray("cards")?.let { array ->
+            List(array.length()) { array.getJSONObject(it).toCompletedCard() }
+        }.orEmpty()
+        val achievements = root.optJSONArray("achievements")?.let { array ->
+            List(array.length()) { array.getJSONObject(it).toAchievement() }
+        }.orEmpty()
+        db.withTransaction {
+            tasks.forEach { db.taskDao().upsert(it) }
+            cards.forEach { db.cardDao().insert(it) }
+            achievements.forEach { db.achievementDao().upsert(it) }
         }
-        root.optJSONArray("cards")?.let { array ->
-            for (i in 0 until array.length()) db.cardDao().insert(array.getJSONObject(i).toCompletedCard())
-        }
-        root.optJSONArray("achievements")?.let { array ->
-            for (i in 0 until array.length()) db.achievementDao().upsert(array.getJSONObject(i).toAchievement())
-        }
+        return tasks.filter { it.status == TaskStatus.TODO && it.reminderCycleMinutes != null }
     }
 
     private suspend fun unlockAchievements(task: PlanTask): List<Long> {
@@ -177,7 +241,9 @@ class ManManLaiRepository(private val db: AppDatabase) {
                 ),
             )
         }
-        if (task.dueAt != null && (task.completedAt ?: Long.MAX_VALUE) <= task.dueAt) {
+        if (existing.none { it.type == AchievementType.ON_TIME } &&
+            task.dueAt != null && (task.completedAt ?: Long.MAX_VALUE) <= task.dueAt
+        ) {
             unlocked += db.achievementDao().upsert(
                 Achievement(
                     type = AchievementType.ON_TIME,
@@ -189,7 +255,7 @@ class ManManLaiRepository(private val db: AppDatabase) {
                 ),
             )
         }
-        if (task.postponeCount > 0) {
+        if (existing.none { it.type == AchievementType.RECOVERY } && task.postponeCount > 0) {
             unlocked += db.achievementDao().upsert(
                 Achievement(
                     type = AchievementType.RECOVERY,
@@ -200,6 +266,31 @@ class ManManLaiRepository(private val db: AppDatabase) {
                     unlockedAt = System.currentTimeMillis(),
                 ),
             )
+        }
+        if (existing.none { it.type == AchievementType.STREAK }) {
+            val completedDates = db.taskDao().allTasks()
+                .mapNotNull { it.completedAt }
+                .map { Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault()).toLocalDate() }
+                .toSet()
+            var cursor = LocalDate.now()
+            if (cursor !in completedDates) cursor = cursor.minusDays(1)
+            var streak = 0
+            while (cursor in completedDates) {
+                streak++
+                cursor = cursor.minusDays(1)
+            }
+            if (streak >= 3) {
+                unlocked += db.achievementDao().upsert(
+                    Achievement(
+                        type = AchievementType.STREAK,
+                        title = "\u4e09\u5929\u6162\u6162\u6765",
+                        description = "\u8fde\u7eed\u4e09\u5929\u90fd\u6709\u4e00\u5f20\u5b8c\u6210\u5361\uff0c\u8282\u594f\u6b63\u5728\u5f62\u6210\u3002",
+                        progress = streak,
+                        target = 3,
+                        unlockedAt = System.currentTimeMillis(),
+                    ),
+                )
+            }
         }
         return unlocked
     }
@@ -229,6 +320,14 @@ private fun CompletedCard.toJson() = JSONObject()
     .put("completedAt", completedAt)
     .put("summary", summary)
     .put("templateId", templateId)
+    .put("description", description)
+    .put("dueAt", dueAt)
+    .put("remindAt", remindAt)
+    .put("reminderCycleMinutes", reminderCycleMinutes)
+    .put("priority", priority.name)
+    .put("tags", JSONArray(tags))
+    .put("postponeCount", postponeCount)
+    .put("delayReason", delayReason)
     .put("achievementIds", JSONArray(achievementIds))
 
 private fun Achievement.toJson() = JSONObject()
@@ -264,9 +363,25 @@ private fun JSONObject.toCompletedCard() = CompletedCard(
     createdAt = optLong("createdAt"),
     completedAt = optLong("completedAt"),
     summary = optString("summary"),
-    templateId = optString("templateId", "fresh"),
+    templateId = normalizeCardStyleId(optString("templateId", "fresh_ai")),
+    description = optString("description"),
+    dueAt = nullableLong("dueAt"),
+    remindAt = nullableLong("remindAt"),
+    reminderCycleMinutes = nullableInt("reminderCycleMinutes"),
+    priority = Priority.valueOf(optString("priority", Priority.NORMAL.name)),
+    tags = optJSONArray("tags")?.toStringList().orEmpty(),
+    postponeCount = optInt("postponeCount"),
+    delayReason = optString("delayReason"),
     achievementIds = optJSONArray("achievementIds")?.toLongList().orEmpty(),
 )
+
+private fun normalizeCardStyleId(id: String): String = when (id) {
+    "fresh", "fresh_ai" -> "fresh_ai"
+    "dark", "dark_ai" -> "dark_ai"
+    "eye", "eye_ai" -> "eye_ai"
+    "coral", "coral_ai" -> "coral_ai"
+    else -> "fresh_ai"
+}
 
 private fun JSONObject.toAchievement() = Achievement(
     id = optLong("id"),

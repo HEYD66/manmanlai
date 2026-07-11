@@ -8,10 +8,13 @@
 - 当前任务卡支持上下左右拖动，越过阈值后回到牌堆末尾。
 - 点击卡片可 3D 翻面，正面显示任务细节，背面显示创建时间、完成时间、延期次数等摘要信息。
 - 完成任务后生成完成卡并进入卡包，卡包内可查看详情，也可返回牌堆。
+- 完成卡会保留完成当时的牌面、描述、标签、优先级、截止时间和延期记录。
 - 删除任务进入回收站，可恢复或彻底删除。
 - 支持任务编辑、优先级、标签、截止时间、分钟级周期提醒。
+- 点击通知会自动定位对应任务；“稍后”会将任务移到牌堆末尾并重新安排提醒。
 - 内置 8 套主题背景和 4 套牌面样式，主题和牌面可收纳切换。
 - 本地 Room 数据库保存任务、卡包和成就，DataStore 保存偏好设置。
+- Room v3 使用无损迁移和事务，避免升级清库、重复完成卡或跨表写入一半。
 - WorkManager + 系统通知提供温和提醒，完成或删除后的卡片不会继续提醒。
 
 ## 技术栈
@@ -38,13 +41,21 @@
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
-仓库也提供了一个便于测试的 debug 安装包：
+仓库内的 `dist` 目录保留历史测试包；开发中的最新安装包以本地构建输出为准：
 
 ```text
-dist/manmanlai-v1.0.0-debug.apk
+app/build/outputs/apk/debug/app-debug.apk
 ```
 
 这个 APK 仅用于真机测试，不是正式签名发布版。
+
+正式签名并经过 R8/资源压缩的安装包输出到：
+
+```text
+dist/manmanlai-v1.1.0-release.apk
+```
+
+release 签名读取项目根目录的 `keystore.properties` 和 `manmanlai-release.jks`。这两个文件已被 Git 忽略，必须在本机另行备份；后续版本需要继续使用同一密钥，否则无法覆盖安装更新。
 
 如果需要指定 Android Studio 自带的 JDK：
 
@@ -69,7 +80,14 @@ adb install -r -g app/build/outputs/apk/debug/app-debug.apk
 .\gradlew.bat test
 ```
 
-当前第一版以真机调试和 debug 包构建验证为主。后续可以继续补充牌堆逻辑、Room 仓库、提醒调度、卡包回流和 Compose UI 测试。
+当前包含牌堆逻辑单元测试，以及完成去重、完成卡快照、卡包回流、回收站和延期提醒的 Room 真机测试。
+
+```powershell
+.\gradlew.bat testDebugUnitTest
+.\gradlew.bat connectedDebugAndroidTest
+```
+
+如果 Windows 下项目路径包含中文，Gradle 8.4 的本地 JVM 测试可能出现 classpath 编码问题；可从纯英文路径副本执行测试。真机测试也可以直接安装 `app-debug-androidTest.apk` 后通过 `am instrument` 运行。
 
 ## 项目结构
 

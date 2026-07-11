@@ -8,9 +8,11 @@ import com.slowly.manmanlai.Achievement
 import com.slowly.manmanlai.CompletedCard
 import com.slowly.manmanlai.ManManLaiRepository
 import com.slowly.manmanlai.PlanTask
+import com.slowly.manmanlai.Priority
 import com.slowly.manmanlai.SettingsRepository
 import com.slowly.manmanlai.worker.NotificationHelper
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
@@ -23,13 +25,16 @@ data class ManManLaiUiState(
     val achievements: List<Achievement> = emptyList(),
     val themeId: String = "fresh",
     val cardStyleId: String = "fresh_ai",
+    val focusTaskId: Long? = null,
 )
 
 class ManManLaiViewModel(
     private val repository: ManManLaiRepository,
     private val settings: SettingsRepository,
-    private val context: Context,
+    context: Context,
 ) : ViewModel() {
+    private val appContext = context.applicationContext
+    private val focusTaskId = MutableStateFlow<Long?>(null)
     private val contentState = combine(
         repository.deck,
         repository.trash,
@@ -39,7 +44,7 @@ class ManManLaiViewModel(
         ManManLaiUiState(deck = deck, trash = trash, cards = cards, achievements = achievements)
     }
 
-    val uiState: StateFlow<ManManLaiUiState> = combine(
+    private val themedState = combine(
         contentState,
         settings.themeId,
         settings.cardStyleId,
@@ -48,6 +53,10 @@ class ManManLaiViewModel(
             themeId = themeId,
             cardStyleId = cardStyleId,
         )
+    }
+
+    val uiState: StateFlow<ManManLaiUiState> = combine(themedState, focusTaskId) { content, taskId ->
+        content.copy(focusTaskId = taskId)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ManManLaiUiState())
 
     init {
@@ -56,25 +65,41 @@ class ManManLaiViewModel(
         }
     }
 
-    fun addTask(title: String, description: String, tags: String, reminderMinutes: Int?) {
+    fun addTask(
+        title: String,
+        description: String,
+        tags: String,
+        reminderMinutes: Int?,
+        priority: Priority,
+        dueAt: Long?,
+    ) {
         viewModelScope.launch {
             val remindAt = reminderMinutes?.let { System.currentTimeMillis() + it.coerceAtLeast(1) * 60 * 1000L }
             val taskTitle = title.ifBlank { "\u4eca\u5929\u7684\u4e00\u5c0f\u6b65" }
             val id = repository.addTask(
                 title = taskTitle,
                 description = description,
-                dueAt = null,
+                dueAt = dueAt,
                 remindAt = remindAt,
                 tags = tags.split(" ", "\uff0c", ",").filter { it.isNotBlank() },
                 reminderCycleMinutes = reminderMinutes?.coerceAtLeast(1),
+                priority = priority,
             )
-            NotificationHelper.schedule(context, id, taskTitle, remindAt, reminderMinutes, "#$id")
+            NotificationHelper.schedule(appContext, id, taskTitle, remindAt, reminderMinutes, "#$id")
         }
     }
 
-    fun editTask(task: PlanTask, title: String, description: String, tags: String, reminderMinutes: Int?) {
+    fun editTask(
+        task: PlanTask,
+        title: String,
+        description: String,
+        tags: String,
+        reminderMinutes: Int?,
+        priority: Priority,
+        dueAt: Long?,
+    ) {
         viewModelScope.launch {
-            NotificationHelper.cancel(context, task.id)
+            NotificationHelper.cancel(appContext, task.id)
             val nextReminder = reminderMinutes?.let { System.currentTimeMillis() + it.coerceAtLeast(1) * 60 * 1000L }
             val updated = task.copy(
                 title = title.ifBlank { task.title },
@@ -82,9 +107,11 @@ class ManManLaiViewModel(
                 tags = tags.split(" ", "\uff0c", ",").filter { it.isNotBlank() },
                 remindAt = nextReminder,
                 reminderCycleMinutes = reminderMinutes?.coerceAtLeast(1),
+                priority = priority,
+                dueAt = dueAt,
             )
             repository.updateTask(updated)
-            NotificationHelper.schedule(context, updated.id, updated.title, nextReminder, updated.reminderCycleMinutes, "#${updated.id}")
+            NotificationHelper.schedule(appContext, updated.id, updated.title, nextReminder, updated.reminderCycleMinutes, "#${updated.id}")
         }
     }
 
@@ -93,23 +120,29 @@ class ManManLaiViewModel(
     }
 
     fun postpone(task: PlanTask) {
-        viewModelScope.launch { repository.postponeTask(task) }
+        viewModelScope.launch {
+            val postponed = repository.postponeTask(task)
+            scheduleReminder(postponed)
+        }
     }
 
     fun delete(task: PlanTask) {
         viewModelScope.launch {
-            NotificationHelper.cancel(context, task.id)
+            NotificationHelper.cancel(appContext, task.id)
             repository.deleteTask(task)
         }
     }
 
     fun restore(task: PlanTask) {
-        viewModelScope.launch { repository.restoreTask(task) }
+        viewModelScope.launch {
+            val restored = repository.restoreTask(task)
+            scheduleReminder(restored)
+        }
     }
 
     fun purge(task: PlanTask) {
         viewModelScope.launch {
-            NotificationHelper.cancel(context, task.id)
+            NotificationHelper.cancel(appContext, task.id)
             repository.purgeTask(task)
         }
     }
@@ -119,13 +152,16 @@ class ManManLaiViewModel(
     }
 
     fun returnCardToDeck(card: CompletedCard) {
-        viewModelScope.launch { repository.returnCardToDeck(card) }
+        viewModelScope.launch {
+            val restored = repository.returnCardToDeck(card)
+            scheduleReminder(restored)
+        }
     }
 
     fun complete(task: PlanTask) {
         viewModelScope.launch {
-            NotificationHelper.cancel(context, task.id)
-            repository.completeTask(task, uiState.value.themeId)
+            NotificationHelper.cancel(appContext, task.id)
+            repository.completeTask(task, uiState.value.cardStyleId)
         }
     }
 
@@ -142,7 +178,37 @@ class ManManLaiViewModel(
     }
 
     fun importBackup(json: String) {
-        viewModelScope.launch { repository.importJson(json) }
+        viewModelScope.launch {
+            repository.importJson(json).forEach { imported ->
+                val nextReminder = imported.remindAt?.takeIf { it > System.currentTimeMillis() }
+                    ?: imported.reminderCycleMinutes?.let { System.currentTimeMillis() + it * 60_000L }
+                val rearmed = imported.copy(remindAt = nextReminder)
+                repository.updateTask(rearmed)
+                scheduleReminder(rearmed)
+            }
+        }
+    }
+
+    fun focusTask(taskId: Long) {
+        viewModelScope.launch {
+            repository.focusTask(taskId)
+            focusTaskId.value = taskId
+        }
+    }
+
+    fun consumeFocusTask() {
+        focusTaskId.value = null
+    }
+
+    private fun scheduleReminder(task: PlanTask) {
+        NotificationHelper.schedule(
+            context = appContext,
+            taskId = task.id,
+            title = task.title,
+            remindAt = task.remindAt,
+            repeatMinutes = task.reminderCycleMinutes,
+            label = "#${task.id}",
+        )
     }
 }
 

@@ -1,6 +1,7 @@
 package com.slowly.manmanlai
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
 enum class TaskStatus { TODO, DONE, ARCHIVED, DELETED }
@@ -25,7 +26,10 @@ data class PlanTask(
     val deckOrder: Int = 0,
 )
 
-@Entity(tableName = "completed_cards")
+@Entity(
+    tableName = "completed_cards",
+    indices = [Index(value = ["sourceTaskId"], unique = true)],
+)
 data class CompletedCard(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val sourceTaskId: Long,
@@ -34,6 +38,14 @@ data class CompletedCard(
     val completedAt: Long,
     val summary: String,
     val templateId: String,
+    val description: String = "",
+    val dueAt: Long? = null,
+    val remindAt: Long? = null,
+    val reminderCycleMinutes: Int? = null,
+    val priority: Priority = Priority.NORMAL,
+    val tags: List<String> = emptyList(),
+    val postponeCount: Int = 0,
+    val delayReason: String = "",
     val achievementIds: List<Long> = emptyList(),
 )
 

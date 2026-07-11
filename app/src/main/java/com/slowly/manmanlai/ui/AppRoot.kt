@@ -1,6 +1,7 @@
 package com.slowly.manmanlai.ui
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
@@ -15,13 +16,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -39,6 +43,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -47,19 +53,27 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TimePicker
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.Typography
+import androidx.compose.material3.rememberDatePickerState
+import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -73,20 +87,28 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.slowly.manmanlai.Achievement
 import com.slowly.manmanlai.CompletedCard
 import com.slowly.manmanlai.DeckLogic
 import com.slowly.manmanlai.PlanTask
+import com.slowly.manmanlai.Priority
 import com.slowly.manmanlai.R
 import com.slowly.manmanlai.formatDateTime
 import kotlin.math.roundToInt
+import kotlin.math.abs
+import kotlin.math.sign
 import kotlin.math.sin
+import kotlinx.coroutines.launch
 
 private enum class Tab(val label: String) {
     Deck("\u724c\u5806"),
@@ -105,6 +127,13 @@ fun ManManLaiAppRoot(viewModel: ManManLaiViewModel) {
     var showAdd by remember { mutableStateOf(false) }
     var backupText by remember { mutableStateOf("") }
     var showBackup by remember { mutableStateOf(false) }
+
+    LaunchedEffect(state.focusTaskId) {
+        if (state.focusTaskId != null) {
+            tab = Tab.Deck
+            viewModel.consumeFocusTask()
+        }
+    }
 
     MaterialTheme(
         colorScheme = appColorScheme(template),
@@ -178,7 +207,6 @@ fun ManManLaiAppRoot(viewModel: ManManLaiViewModel) {
                         )
                         Tab.Pack -> CardPackScreen(
                             cards = state.cards,
-                            cardStyleId = state.cardStyleId,
                             onDelete = viewModel::deleteCompleted,
                             onReturn = viewModel::returnCardToDeck,
                         )
@@ -211,8 +239,8 @@ fun ManManLaiAppRoot(viewModel: ManManLaiViewModel) {
     if (showAdd) {
         AddTaskDialog(
             onDismiss = { showAdd = false },
-            onAdd = { title, desc, tags, minutes ->
-                viewModel.addTask(title, desc, tags, minutes)
+            onAdd = { title, desc, tags, minutes, priority, dueAt ->
+                viewModel.addTask(title, desc, tags, minutes, priority, dueAt)
                 showAdd = false
             },
         )
@@ -237,12 +265,14 @@ private fun DeckScreen(
     onComplete: (PlanTask) -> Unit,
     onPostpone: (PlanTask) -> Unit,
     onDelete: (PlanTask) -> Unit,
-    onEdit: (PlanTask, String, String, String, Int?) -> Unit,
+    onEdit: (PlanTask, String, String, String, Int?, Priority, Long?) -> Unit,
 ) {
-    Box(Modifier.fillMaxSize().padding(20.dp), contentAlignment = Alignment.Center) {
+    BoxWithConstraints(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 10.dp), contentAlignment = Alignment.Center) {
         if (tasks.isEmpty()) {
             EmptyDeck()
         } else {
+            val widthFromHeight = maxHeight * (5f / 7f)
+            val cardWidth = minOf(maxWidth * 0.86f, widthFromHeight * 0.96f, 365.dp)
             val visibleTasks = tasks.take(5)
             visibleTasks.reversed().forEach { task ->
                 val fanSlot = visibleTasks.indexOf(task)
@@ -251,6 +281,7 @@ private fun DeckScreen(
                     cardStyleId = cardStyleId,
                     isTop = task == tasks.first(),
                     stackIndex = fanSlot,
+                    cardWidth = cardWidth,
                     onCycle = onCycle,
                     onComplete = onComplete,
                     onPostpone = onPostpone,
@@ -268,17 +299,21 @@ private fun TaskPlayingCard(
     cardStyleId: String,
     isTop: Boolean,
     stackIndex: Int,
+    cardWidth: Dp,
     onCycle: (PlanTask) -> Unit,
     onComplete: (PlanTask) -> Unit,
     onPostpone: (PlanTask) -> Unit,
     onDelete: (PlanTask) -> Unit,
-    onEdit: (PlanTask, String, String, String, Int?) -> Unit,
+    onEdit: (PlanTask, String, String, String, Int?, Priority, Long?) -> Unit,
 ) {
     val style = cardStyleOf(cardStyleId)
     val cardClickSource = remember { MutableInteractionSource() }
     var flipped by remember(task.id) { mutableStateOf(false) }
     var offset by remember(task.id) { mutableStateOf(Offset.Zero) }
     var editing by remember(task.id) { mutableStateOf(false) }
+    var settling by remember(task.id) { mutableStateOf(false) }
+    var departed by remember(task.id) { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     val rotation by animateFloatAsState(
         targetValue = if (flipped) 180f else 0f,
         animationSpec = tween(durationMillis = 520, easing = FastOutSlowInEasing),
@@ -288,7 +323,14 @@ private fun TaskPlayingCard(
     val showingBack = rotation > 90f
     val flipScaleX = kotlin.math.abs(kotlin.math.cos(Math.toRadians(rotation.toDouble()))).toFloat().coerceAtLeast(0.08f)
     val shape = RoundedCornerShape(18.dp)
-    val dragModifier = if (isTop) {
+    LaunchedEffect(isTop) {
+        if (!isTop) {
+            offset = Offset.Zero
+            settling = false
+            departed = false
+        }
+    }
+    val dragModifier = if (isTop && !settling) {
         Modifier.pointerInput(task.id) {
             detectDragGestures(
                 onDrag = { change, dragAmount ->
@@ -297,8 +339,34 @@ private fun TaskPlayingCard(
                 },
                 onDragEnd = {
                     val shouldCycle = DeckLogic.shouldCycleCard(offset.x, offset.y, size.width.toFloat(), size.height.toFloat())
-                    offset = Offset.Zero
-                    if (shouldCycle) onCycle(task)
+                    val start = offset
+                    settling = true
+                    scope.launch {
+                        val progress = Animatable(0f)
+                        if (shouldCycle) {
+                            val target = if (abs(start.x) >= abs(start.y)) {
+                                Offset(sign(start.x).takeIf { it != 0f } ?: 1f, start.y / size.height)
+                                    .let { Offset(it.x * size.width * 1.45f, it.y * size.height + start.y) }
+                            } else {
+                                Offset(start.x, (sign(start.y).takeIf { it != 0f } ?: 1f) * size.height * 1.3f)
+                            }
+                            progress.animateTo(1f, tween(210, easing = FastOutSlowInEasing)) {
+                                offset = Offset(
+                                    x = start.x + (target.x - start.x) * value,
+                                    y = start.y + (target.y - start.y) * value,
+                                )
+                            }
+                            departed = true
+                            onCycle(task)
+                        } else {
+                            progress.animateTo(1f, tween(220, easing = FastOutSlowInEasing)) {
+                                val easedBack = 1f - value
+                                offset = Offset(start.x * easedBack, start.y * easedBack)
+                            }
+                            offset = Offset.Zero
+                            settling = false
+                        }
+                    }
                 },
                 onDragCancel = { offset = Offset.Zero },
             )
@@ -307,16 +375,16 @@ private fun TaskPlayingCard(
         Modifier
     }
     val fanX = when (stackIndex) {
-        1 -> -42
-        2 -> 42
-        3 -> -78
-        4 -> 78
-        else -> 0
+        1 -> (-28).dp
+        2 -> 28.dp
+        3 -> (-52).dp
+        4 -> 52.dp
+        else -> 0.dp
     }
     val fanY = when (stackIndex) {
-        1, 2 -> 24
-        3, 4 -> 46
-        else -> 0
+        1, 2 -> 18.dp
+        3, 4 -> 34.dp
+        else -> 0.dp
     }
     val fanRotation = when (stackIndex) {
         1 -> -8f
@@ -333,14 +401,15 @@ private fun TaskPlayingCard(
 
     Box(
         modifier = Modifier
-            .fillMaxWidth(0.78f)
-            .width(365.dp)
+            .width(cardWidth)
             .aspectRatio(5f / 7f)
-            .offset { IntOffset(offset.x.roundToInt() + fanX, offset.y.roundToInt() + fanY) }
+            .offset(x = fanX, y = fanY)
+            .offset { IntOffset(offset.x.roundToInt(), offset.y.roundToInt()) }
             .graphicsLayer {
                 scaleX = fanScale
                 scaleY = fanScale
                 rotationZ = if (isTop) offset.x / 36f else fanRotation
+                alpha = if (departed) 0f else 1f
             }
             .then(dragModifier)
             .clickable(
@@ -397,8 +466,8 @@ private fun TaskPlayingCard(
             titleText = "\u7f16\u8f91\u8ba1\u5212\u5361",
             task = task,
             onDismiss = { editing = false },
-            onSave = { title, desc, tags, minutes ->
-                onEdit(task, title, desc, tags, minutes)
+            onSave = { title, desc, tags, minutes, priority, dueAt ->
+                onEdit(task, title, desc, tags, minutes, priority, dueAt)
                 editing = false
             },
         )
@@ -420,21 +489,44 @@ private fun CardFront(
         Column {
             PokerCorner(task.id.takeCardCode(), style.accent.asColor())
             Spacer(Modifier.height(12.dp))
-            Text(task.title, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black, color = style.text.asColor())
+            Text(
+                task.title,
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Black,
+                color = style.text.asColor(),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
             Text("#${task.id}", style = MaterialTheme.typography.labelMedium, color = style.text.asColor().copy(alpha = 0.68f))
             Spacer(Modifier.height(10.dp))
             Text(
                 task.description.ifBlank { "\u5148\u505a\u4e00\u70b9\u70b9\uff0c\u4e5f\u7b97\u6570\u3002" },
                 style = MaterialTheme.typography.bodyLarge,
                 color = style.text.asColor().copy(alpha = 0.8f),
-                maxLines = 4,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
             Spacer(Modifier.height(12.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("\u4f18\u5148\u7ea7 ${task.priority.label()}", color = style.text.asColor().copy(alpha = 0.72f), style = MaterialTheme.typography.labelMedium)
+                task.dueAt?.let {
+                    Text(
+                        "\u622a\u6b62 ${it.formatDateTime()}",
+                        color = style.text.asColor().copy(alpha = 0.72f),
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            task.reminderCycleMinutes?.let {
+                Text("\u6bcf $it \u5206\u949f\u6e29\u548c\u63d0\u9192", color = style.text.asColor().copy(alpha = 0.72f), style = MaterialTheme.typography.labelMedium)
+            }
+            Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 val chipTextColor = if (cardStyleId == "dark_ai") style.text.asColor() else style.accent.asColor()
                 val chipContainerColor = if (cardStyleId == "dark_ai") Color.White.copy(alpha = 0.08f) else style.accent.asColor().copy(alpha = 0.08f)
-                task.tags.take(3).forEach {
+                task.tags.take(2).forEach {
                     AssistChip(
                         onClick = {},
                         label = { Text(it, color = chipTextColor, fontWeight = FontWeight.Bold) },
@@ -461,9 +553,22 @@ private fun CardFront(
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("\u5b8c\u6210\uff0c\u6536\u5165\u5361\u5305") }
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(onClick = { onPostpone(task) }, modifier = Modifier.weight(1f)) { Text("\u7a0d\u540e") }
-                    OutlinedButton(onClick = onEdit, modifier = Modifier.weight(1f)) { Text("\u7f16\u8f91") }
-                    OutlinedButton(onClick = { onDelete(task) }, modifier = Modifier.weight(1f)) { Text("\u5220\u9664") }
+                    val actionPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                    OutlinedButton(
+                        onClick = { onPostpone(task) },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = actionPadding,
+                    ) { Text("\u7a0d\u540e", fontSize = 14.sp, maxLines = 1) }
+                    OutlinedButton(
+                        onClick = onEdit,
+                        modifier = Modifier.weight(1f),
+                        contentPadding = actionPadding,
+                    ) { Text("\u7f16\u8f91", fontSize = 14.sp, maxLines = 1) }
+                    OutlinedButton(
+                        onClick = { onDelete(task) },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = actionPadding,
+                    ) { Text("\u5220\u9664", fontSize = 14.sp, maxLines = 1) }
                 }
             } else {
                 Spacer(Modifier.height(104.dp))
@@ -501,7 +606,6 @@ private fun PokerCorner(text: String, color: Color) {
 @Composable
 private fun CardPackScreen(
     cards: List<CompletedCard>,
-    cardStyleId: String,
     onDelete: (CompletedCard) -> Unit,
     onReturn: (CompletedCard) -> Unit,
 ) {
@@ -516,7 +620,7 @@ private fun CardPackScreen(
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        items(cards) { card -> CompletedPlayingCard(card, cardStyleId, onClick = { selected = card }) }
+        items(cards, key = { it.id }) { card -> CompletedPlayingCard(card, onClick = { selected = card }) }
     }
     selected?.let { card ->
         AlertDialog(
@@ -534,9 +638,15 @@ private fun CardPackScreen(
                 ) {
                     DetailBlock("\u5b8c\u6210\u603b\u7ed3", card.summary.ifBlank { "\u8fd9\u5f20\u5361\u5df2\u5b8c\u6210\uff0c\u7ed9\u81ea\u5df1\u8bb0\u4e00\u7b14\u3002" })
                     DetailRow("\u4efb\u52a1\u540d\u79f0", card.title)
+                    DetailRow("\u4efb\u52a1\u7ec6\u8282", card.description.ifBlank { "\u672a\u586b\u5199" })
+                    DetailRow("\u6807\u7b7e", card.tags.ifEmpty { listOf("\u65e0") }.joinToString("  "))
+                    DetailRow("\u4f18\u5148\u7ea7", card.priority.label())
                     DetailRow("\u6765\u6e90\u4efb\u52a1", "#${card.sourceTaskId}")
                     DetailRow("\u521b\u5efa\u65f6\u95f4", card.createdAt.formatDateTime())
                     DetailRow("\u5b8c\u6210\u65f6\u95f4", card.completedAt.formatDateTime())
+                    card.dueAt?.let { DetailRow("\u539f\u622a\u6b62\u65f6\u95f4", it.formatDateTime()) }
+                    card.reminderCycleMinutes?.let { DetailRow("\u539f\u63d0\u9192\u5468\u671f", "\u6bcf $it \u5206\u949f") }
+                    DetailRow("\u5ef6\u671f\u8bb0\u5f55", "${card.postponeCount} \u6b21${card.delayReason.takeIf { it.isNotBlank() }?.let { "\uff0c$it" }.orEmpty()}")
                     DetailRow("\u4f7f\u7528\u724c\u9762", cardStyleOf(card.templateId).name)
                     DetailRow(
                         "\u6210\u5c31\u8bb0\u5f55",
@@ -545,7 +655,7 @@ private fun CardPackScreen(
                 }
             },
             confirmButton = { Button(onClick = { onReturn(card); selected = null }) { Text("\u8fd4\u56de\u724c\u5806") } },
-            dismissButton = { TextButton(onClick = { onDelete(card); selected = null }) { Text("\u4ece\u5361\u5305\u79fb\u9664") } },
+            dismissButton = { TextButton(onClick = { onDelete(card); selected = null }) { Text("\u79fb\u5230\u56de\u6536\u7ad9") } },
         )
     }
 }
@@ -567,7 +677,8 @@ private fun DetailRow(label: String, value: String) {
 }
 
 @Composable
-private fun CompletedPlayingCard(card: CompletedCard, cardStyleId: String, onClick: () -> Unit) {
+private fun CompletedPlayingCard(card: CompletedCard, onClick: () -> Unit) {
+    val cardStyleId = card.templateId
     val style = cardStyleOf(cardStyleId)
     Box(
         modifier = Modifier
@@ -622,7 +733,19 @@ private fun TrashScreen(tasks: List<PlanTask>, onRestore: (PlanTask) -> Unit, on
 
 @Composable
 private fun SummaryScreen(tasks: List<PlanTask>, cards: List<CompletedCard>, achievements: List<Achievement>) {
+    val zone = java.time.ZoneId.systemDefault()
+    val today = java.time.LocalDate.now()
+    val todayStart = today.atStartOfDay(zone).toInstant().toEpochMilli()
+    val weekStart = today.minusDays((today.dayOfWeek.value - 1).toLong())
+        .atStartOfDay(zone).toInstant().toEpochMilli()
     LazyColumn(Modifier.fillMaxSize().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+                StatCard("\u4eca\u65e5", cards.count { it.completedAt >= todayStart }.toString(), Modifier.weight(1f))
+                StatCard("\u672c\u5468", cards.count { it.completedAt >= weekStart }.toString(), Modifier.weight(1f))
+                StatCard("\u8fde\u7eed", "${currentStreak(cards)} \u5929", Modifier.weight(1f))
+            }
+        }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
                 StatCard("\u5f85\u529e", tasks.size.toString(), Modifier.weight(1f))
@@ -631,6 +754,9 @@ private fun SummaryScreen(tasks: List<PlanTask>, cards: List<CompletedCard>, ach
             }
         }
         item { Text("\u6210\u5c31", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
+        if (achievements.isEmpty()) {
+            item { Text("\u5b8c\u6210\u7b2c\u4e00\u5f20\u5361\uff0c\u6210\u5c31\u4f1a\u4ece\u8fd9\u91cc\u5f00\u59cb\u3002") }
+        }
         items(achievements) {
             Card {
                 Column(Modifier.padding(16.dp)) {
@@ -640,6 +766,21 @@ private fun SummaryScreen(tasks: List<PlanTask>, cards: List<CompletedCard>, ach
             }
         }
     }
+}
+
+private fun currentStreak(cards: List<CompletedCard>): Int {
+    val zone = java.time.ZoneId.systemDefault()
+    val completedDates = cards
+        .map { java.time.Instant.ofEpochMilli(it.completedAt).atZone(zone).toLocalDate() }
+        .toSet()
+    var cursor = java.time.LocalDate.now()
+    if (cursor !in completedDates) cursor = cursor.minusDays(1)
+    var streak = 0
+    while (cursor in completedDates) {
+        streak++
+        cursor = cursor.minusDays(1)
+    }
+    return streak
 }
 
 @Composable
@@ -771,7 +912,7 @@ private fun EmptyDeck(text: String = "\u724c\u5806\u7a7a\u4e86\uff0c\u65b0\u589e
 }
 
 @Composable
-private fun AddTaskDialog(onDismiss: () -> Unit, onAdd: (String, String, String, Int?) -> Unit) {
+private fun AddTaskDialog(onDismiss: () -> Unit, onAdd: (String, String, String, Int?, Priority, Long?) -> Unit) {
     TaskEditDialog(
         titleText = "\u65b0\u589e\u8ba1\u5212\u5361",
         task = null,
@@ -780,46 +921,118 @@ private fun AddTaskDialog(onDismiss: () -> Unit, onAdd: (String, String, String,
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TaskEditDialog(
     titleText: String,
     task: PlanTask?,
     onDismiss: () -> Unit,
-    onSave: (String, String, String, Int?) -> Unit,
+    onSave: (String, String, String, Int?, Priority, Long?) -> Unit,
 ) {
     var title by remember { mutableStateOf("") }
     var desc by remember { mutableStateOf("") }
     var tags by remember { mutableStateOf("") }
     var reminderMinutes by remember { mutableStateOf("") }
+    var priority by remember { mutableStateOf(Priority.NORMAL) }
+    var dueAt by remember { mutableStateOf<Long?>(null) }
+    var showDatePicker by remember { mutableStateOf(false) }
+    var showTimePicker by remember { mutableStateOf(false) }
+    var pendingDate by remember { mutableStateOf<java.time.LocalDate?>(null) }
     androidx.compose.runtime.LaunchedEffect(task?.id) {
         title = task?.title.orEmpty()
         desc = task?.description.orEmpty()
         tags = task?.tags?.joinToString(" ").orEmpty()
         reminderMinutes = task?.reminderCycleMinutes?.toString().orEmpty()
+        priority = task?.priority ?: Priority.NORMAL
+        dueAt = task?.dueAt
     }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(titleText) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
                 OutlinedTextField(title, { title = it }, label = { Text("\u4efb\u52a1\u540d\u79f0") }, singleLine = true)
                 OutlinedTextField(desc, { desc = it }, label = { Text("\u4efb\u52a1\u7ec6\u8282") }, minLines = 3)
                 OutlinedTextField(tags, { tags = it }, label = { Text("\u6807\u7b7e\uff0c\u7528\u7a7a\u683c\u5206\u9694") }, singleLine = true)
+                Text("\u4f18\u5148\u7ea7", style = MaterialTheme.typography.labelMedium)
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    Priority.entries.forEachIndexed { index, item ->
+                        SegmentedButton(
+                            selected = priority == item,
+                            onClick = { priority = item },
+                            shape = SegmentedButtonDefaults.itemShape(index, Priority.entries.size),
+                        ) { Text(item.label()) }
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { showDatePicker = true }, modifier = Modifier.weight(1f)) {
+                        Text(dueAt?.let { "\u622a\u6b62 ${it.formatDateTime()}" } ?: "\u9009\u62e9\u622a\u6b62\u65f6\u95f4")
+                    }
+                    if (dueAt != null) TextButton(onClick = { dueAt = null }) { Text("\u6e05\u9664") }
+                }
                 OutlinedTextField(
                     reminderMinutes,
                     { value -> reminderMinutes = value.filter { it.isDigit() }.take(5) },
                     label = { Text("\u63d0\u9192\u5468\u671f\uff08\u5206\u949f\uff09") },
                     singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
                 )
             }
         },
         confirmButton = {
-            Button(onClick = { onSave(title, desc, tags, reminderMinutes.toIntOrNull()) }) {
+            Button(onClick = { onSave(title, desc, tags, reminderMinutes.toIntOrNull(), priority, dueAt) }) {
                 Text(if (task == null) "\u52a0\u5165\u724c\u5806" else "\u4fdd\u5b58")
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("\u53d6\u6d88") } },
     )
+
+    if (showDatePicker) {
+        val initialDateMillis = dueAt?.let {
+            java.time.Instant.ofEpochMilli(it).atZone(java.time.ZoneId.systemDefault()).toLocalDate()
+                .atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
+        }
+        val dateState = rememberDatePickerState(initialSelectedDateMillis = initialDateMillis)
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingDate = dateState.selectedDateMillis?.let {
+                        java.time.Instant.ofEpochMilli(it).atZone(java.time.ZoneOffset.UTC).toLocalDate()
+                    }
+                    showDatePicker = false
+                    showTimePicker = pendingDate != null
+                }) { Text("\u4e0b\u4e00\u6b65") }
+            },
+            dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text("\u53d6\u6d88") } },
+        ) { DatePicker(state = dateState) }
+    }
+
+    if (showTimePicker) {
+        val currentTime = dueAt?.let {
+            java.time.Instant.ofEpochMilli(it).atZone(java.time.ZoneId.systemDefault()).toLocalTime()
+        } ?: java.time.LocalTime.now()
+        val timeState = rememberTimePickerState(initialHour = currentTime.hour, initialMinute = currentTime.minute)
+        AlertDialog(
+            onDismissRequest = { showTimePicker = false },
+            title = { Text("\u9009\u62e9\u622a\u6b62\u65f6\u95f4") },
+            text = { TimePicker(state = timeState) },
+            confirmButton = {
+                Button(onClick = {
+                    dueAt = pendingDate
+                        ?.atTime(timeState.hour, timeState.minute)
+                        ?.atZone(java.time.ZoneId.systemDefault())
+                        ?.toInstant()
+                        ?.toEpochMilli()
+                    showTimePicker = false
+                }) { Text("\u786e\u5b9a") }
+            },
+            dismissButton = { TextButton(onClick = { showTimePicker = false }) { Text("\u53d6\u6d88") } },
+        )
+    }
 }
 
 @Composable
@@ -1090,6 +1303,12 @@ private fun com.slowly.manmanlai.TaskStatus.label(): String = when (this) {
     com.slowly.manmanlai.TaskStatus.DONE -> "\u5df2\u5b8c\u6210"
     com.slowly.manmanlai.TaskStatus.ARCHIVED -> "\u5df2\u6536\u85cf"
     com.slowly.manmanlai.TaskStatus.DELETED -> "\u56de\u6536\u7ad9"
+}
+
+private fun com.slowly.manmanlai.Priority.label(): String = when (this) {
+    com.slowly.manmanlai.Priority.LOW -> "\u4f4e"
+    com.slowly.manmanlai.Priority.NORMAL -> "\u666e\u901a"
+    com.slowly.manmanlai.Priority.HIGH -> "\u9ad8"
 }
 
 private fun Long.takeCardCode(): String = if (this <= 0L) "0" else this.toString().takeLast(3).padStart(3, '0')
